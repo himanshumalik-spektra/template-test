@@ -19,7 +19,15 @@ Param (
     [string]
     $trainerUserName,
     [string]
-    $trainerUserPassword
+    $trainerUserPassword,
+    [string]
+    $GitHubUserName,
+    [string]
+    $GitHubOrg,
+    [string]
+    $GitHubProvisioningApi,
+    [string]
+    $DataPackUrl
 )
 
 # Clinical Trial Pre-Screening Crew (GLYCO-ADD): JumpVM setup.
@@ -170,6 +178,39 @@ if (Test-Path $code) {
 # -------------------------------------------------------------------
 New-Item -ItemType Directory -Force -Path "C:\LabFiles" | Out-Null
 [System.IO.File]::WriteAllText("C:\LabFiles\deployment-id.txt", $DeploymentID)
+
+# -------------------------------------------------------------------
+# LEARNER DATA -> C:\LabFiles\glyco-screening (cohorts\, data\, protocol\)
+# The zip has no top-level folder, so it is extracted into its own folder.
+# -------------------------------------------------------------------
+try {
+    Write-Host "Downloading the learner data..."
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $dataZip = "C:\LabFiles\glyco-screening-learner-data.zip"
+    $dataDir = "C:\LabFiles\glyco-screening"
+    (New-Object System.Net.WebClient).DownloadFile($DataPackUrl, $dataZip)
+    New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
+    Expand-Archive -LiteralPath $dataZip -DestinationPath $dataDir -Force
+    Remove-Item $dataZip -Force
+    Write-Host "Learner data extracted to $dataDir"
+} catch {
+    Write-Warning "Learner data download failed: $($_.Exception.Message)"
+}
+
+# -------------------------------------------------------------------
+# GitHub EMU provisioning (secret-free).
+# -------------------------------------------------------------------
+New-Item -ItemType Directory -Path 'C:\Packages\github-emu-provisioner' -Force | Out-Null
+Copy-Item "$path\cloudlabs-common\Request-GitHubProvisioning.ps1" 'C:\Packages\github-emu-provisioner\' -Force
+$ghArgs = "-ExecutionPolicy Bypass -NoProfile -File C:\Packages\github-emu-provisioner\Request-GitHubProvisioning.ps1 -ApiBaseUrl $GitHubProvisioningApi -DeploymentId $DeploymentID -LabName $ODLID"
+$ghAction = New-ScheduledTaskAction -Execute 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -Argument $ghArgs
+$ghPrincipal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+Register-ScheduledTask -TaskName 'GitHubProvisioning' -Action $ghAction -Trigger (New-ScheduledTaskTrigger -AtStartup) -Principal $ghPrincipal -Force | Out-Null
+# Start it now as well: the platform deletes the deployment record minutes after the lab deploys,
+# often before the reboot completes, and the service reads the attendee from that record.
+Start-ScheduledTask -TaskName 'GitHubProvisioning'
+
+[System.Environment]::SetEnvironmentVariable('GitUserEmail', $GitHubUserName, [System.EnvironmentVariableTarget]::Machine)
 
 Import-Module $env:ChocolateyInstall\helpers\chocolateyProfile.psm1
 

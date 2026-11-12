@@ -27,9 +27,33 @@
     "trainerUserPassword": {
       "type": "string"
     },
+    "GitHubUserName": {
+      "type": "string",
+      "metadata": { "description": "Kept for parity with the CloudLabs parameters file; the EMU username is derived from azureUserName." }
+    },
+    "GitHubOrg": {
+      "type": "string"
+    },
+    "GitHubTier": {
+      "type": "string",
+      "defaultValue": "Copilot",
+      "allowedValues": [ "Default", "Copilot", "GHAS" ],
+      "metadata": { "description": "GitHub licence for the attendee. Read by the provisioning service from the deployment parameters; never passed to the VM." }
+    },
+    "GitHubAccessHours": {
+      "type": "int",
+      "defaultValue": 96,
+      "minValue": 1,
+      "metadata": { "description": "Hours of GitHub access from VM creation (4-day lab validity; the service caps at 720). Read by the provisioning service from the deployment parameters." }
+    },
     "azuserobjectid": {
       "type": "string",
       "metadata": { "description": "Learner's Entra object ID (GET-AZUSER-OBJECTID). Gets the data-plane roles below: CloudLabs creates the custom learner role without its DataActions." }
+    },
+    "DataPackUrl": {
+      "type": "string",
+      "defaultValue": "https://raw.githubusercontent.com/himanshumalik-spektra/template-test/main/lab-dataset/glyco-screening-learner-data.zip",
+      "metadata": { "description": "Public raw URL of the learner data zip (cohorts, data, protocol). Extracted to C:\\LabFiles\\glyco-screening on the VM." }
     },
     "extractorModelCapacity": {
       "type": "int",
@@ -65,7 +89,7 @@
     "embeddingModel": "text-embedding-3-small",
     "searchName": "[concat('srch-glyco-', variables('suffix'))]",
     "contentSafetyName": "[concat('cs-glyco-', variables('suffix'))]",
-    "identityName": "[concat('id-glyco-', variables('suffix'))]",
+    "identityName": "id-glyco-screening",
     "registryName": "[concat('crglyco', variables('suffix'))]",
     "logAnalyticsName": "[concat('log-glyco-', variables('suffix'))]",
     "appInsightsName": "[concat('appi-glyco-', variables('suffix'))]",
@@ -97,7 +121,11 @@
     "roleSearchServiceContributor": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7ca78c08-252a-4471-8644-bb5ff32d4ba0')]",
     "roleSearchIndexDataContributor": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '8ebe5a00-799e-43f5-93ac-243d3dce84a7')]",
 
-    "cloudlabsCommon": "[concat(' -AzureUserName ', parameters('azureUserName'), ' -AzurePassword ', parameters('azurePassword'), ' -AzureTenantID ', variables('AzureTenantID'), ' -AzureSubscriptionID ', variables('AzureSubscriptionID'), ' -ODLID ', parameters('ODLID'), ' -DeploymentID ', parameters('DeploymentID'), ' -adminPassword ', parameters('adminPassword'))]",
+    "cloudlabsCommon": "[concat(' -AzureUserName ', parameters('azureUserName'), ' -AzurePassword ', parameters('azurePassword'), ' -AzureTenantID ', variables('AzureTenantID'), ' -AzureSubscriptionID ', variables('AzureSubscriptionID'), ' -ODLID ', parameters('ODLID'), ' -DeploymentID ', parameters('DeploymentID'), ' -adminPassword ', parameters('adminPassword'), ' -GitHubUserName ', variables('transformedValue'), ' -GitHubOrg ', parameters('GitHubOrg'), ' -GitHubProvisioningApi ', variables('gitHubProvisioningApi'), ' -DataPackUrl ', parameters('DataPackUrl'))]",
+    "gitHubProvisioningApi": "https://ghemuprov-s7smlia4k3zoq.azurewebsites.net/api",
+    "originalEmail": "[parameters('azureUserName')]",
+    "extractedPart": "[split(variables('originalEmail'), '@')[0]]",
+    "transformedValue": "[concat(replace(variables('extractedPart'), '_', '-'), '_clabs')]",
     "Enable-CloudLabsEmbeddedShadow": "[concat(' -vmAdminUsername ', parameters('adminUsername'), ' -trainerUserName ', parameters('trainerUserName'), ' -trainerUserPassword ', parameters('trainerUserPassword'))]",
     "LabVMName": "[concat('labvm-', parameters('DeploymentID'))]",
     "networkInterfaceName": "[concat(variables('LabVMName'), '-nic')]",
@@ -176,8 +204,9 @@
             "autoUpgradeMinorVersion": true,
             "settings": {
               "fileUris": [
-                "https://experienceazure.blob.core.windows.net/templates/HTS/clinical-trial-screening/scripts/psscript.ps1",
-                "https://experienceazure.blob.core.windows.net/templates/cloudlabs-common/cloudlabs-windows-functions.ps1"
+                "https://raw.githubusercontent.com/himanshumalik-spektra/template-test/refs/heads/main/psscript.ps1",
+                "https://experienceazure.blob.core.windows.net/templates/cloudlabs-common/cloudlabs-windows-functions.ps1",
+                "https://experienceazure.blob.core.windows.net/templates/cloudlabs-common/Request-GitHubProvisioning.ps1"
               ]
             },
             "protectedSettings": {
@@ -186,6 +215,20 @@
           }
         }
       ]
+    },
+    {
+      "comments": "Reader on this resource group for the VM's system-assigned identity, so the GitHub provisioning service can read the VM and this deployment with the VM's own token.",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[guid(resourceGroup().id, variables('LabVMName'), 'ghemu-reader')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines', variables('LabVMName'))]"
+      ],
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'acdd72a7-3385-48ef-bd42-f606fba81ae7')]",
+        "principalId": "[reference(resourceId('Microsoft.Compute/virtualMachines', variables('LabVMName')), '2022-11-01', 'full').identity.principalId]",
+        "principalType": "ServicePrincipal"
+      }
     },
     {
       "name": "[variables('virtualNetworkName')]",
@@ -825,6 +868,14 @@
     "Trainer Password": {
       "type": "string",
       "value": "[parameters('trainerUserPassword')]"
+    },
+    "GitHub User Name": {
+      "type": "string",
+      "value": "[variables('transformedValue')]"
+    },
+    "JumpVM Identity Object ID": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Compute/virtualMachines', variables('LabVMName')), '2022-11-01', 'full').identity.principalId]"
     },
     "Suffix": {
       "type": "string",

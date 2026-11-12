@@ -26,6 +26,12 @@
     "trainerUserPassword": {
       "value": "GEN-PASSWORD"
     },
+    "GitHubUserName": {
+      "value": "GET-AZUSER-UPN"
+    },
+    "GitHubOrg": {
+      "value": "Cloudlabs-Enterprise"
+    },
     "azuserobjectid": {
       "value": "GET-AZUSER-OBJECTID"
     }
