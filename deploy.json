@@ -1,0 +1,898 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "azureUserName": {
+      "type": "string"
+    },
+    "azurePassword": {
+      "type": "securestring"
+    },
+    "ODLID": {
+      "type": "string"
+    },
+    "DeploymentID": {
+      "type": "string",
+      "metadata": { "description": "Unique per learner. Goes into every resource name (lowercased). Must be letters/digits only so registry and storage names stay valid." }
+    },
+    "adminUsername": {
+      "type": "string"
+    },
+    "adminPassword": {
+      "type": "securestring"
+    },
+    "trainerUserName": {
+      "type": "string"
+    },
+    "trainerUserPassword": {
+      "type": "string"
+    },
+    "azuserobjectid": {
+      "type": "string",
+      "metadata": { "description": "Learner's Entra object ID (GET-AZUSER-OBJECTID). Gets the data-plane roles below: CloudLabs creates the custom learner role without its DataActions." }
+    },
+    "extractorModelCapacity": {
+      "type": "int",
+      "defaultValue": 50,
+      "metadata": { "description": "gpt-5.4 Global Standard capacity in thousands of TPM (extractor and groundedness judge)." }
+    },
+    "reviewerModelCapacity": {
+      "type": "int",
+      "defaultValue": 100,
+      "metadata": { "description": "gpt-5.4-mini Global Standard capacity in thousands of TPM (reviewers and Note Reviewer)." }
+    },
+    "embeddingModelCapacity": {
+      "type": "int",
+      "defaultValue": 50,
+      "metadata": { "description": "text-embedding-3-small Global Standard capacity in thousands of TPM (protocol index and query vectorizer)." }
+    },
+    "auditRetentionDays": {
+      "type": "int",
+      "defaultValue": 7,
+      "metadata": { "description": "Time-based immutability on the audit container (unlocked, protected append writes allowed)." }
+    }
+  },
+  "variables": {
+    "AzureSubscriptionID": "[subscription().subscriptionId]",
+    "AzureTenantID": "[subscription().tenantId]",
+    "location": "[resourceGroup().location]",
+    "suffix": "[toLower(parameters('DeploymentID'))]",
+
+    "foundryName": "[concat('aif-glyco-', variables('suffix'))]",
+    "projectName": "glyco-screening",
+    "extractorModel": "gpt-5.4",
+    "reviewerModel": "gpt-5.4-mini",
+    "embeddingModel": "text-embedding-3-small",
+    "searchName": "[concat('srch-glyco-', variables('suffix'))]",
+    "contentSafetyName": "[concat('cs-glyco-', variables('suffix'))]",
+    "identityName": "[concat('id-glyco-', variables('suffix'))]",
+    "registryName": "[concat('crglyco', variables('suffix'))]",
+    "logAnalyticsName": "[concat('log-glyco-', variables('suffix'))]",
+    "appInsightsName": "[concat('appi-glyco-', variables('suffix'))]",
+    "storageAccountName": "[concat('stglyco', variables('suffix'))]",
+    "containerEnvName": "[concat('cae-glyco-', variables('suffix'))]",
+
+    "foundryId": "[resourceId('Microsoft.CognitiveServices/accounts', variables('foundryName'))]",
+    "projectId": "[resourceId('Microsoft.CognitiveServices/accounts/projects', variables('foundryName'), variables('projectName'))]",
+    "searchId": "[resourceId('Microsoft.Search/searchServices', variables('searchName'))]",
+    "contentSafetyId": "[resourceId('Microsoft.CognitiveServices/accounts', variables('contentSafetyName'))]",
+    "identityId": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('identityName'))]",
+    "registryId": "[resourceId('Microsoft.ContainerRegistry/registries', variables('registryName'))]",
+    "logAnalyticsId": "[resourceId('Microsoft.OperationalInsights/workspaces', variables('logAnalyticsName'))]",
+    "appInsightsId": "[resourceId('Microsoft.Insights/components', variables('appInsightsName'))]",
+    "storageId": "[resourceId('Microsoft.Storage/storageAccounts', variables('storageAccountName'))]",
+    "containerEnvId": "[resourceId('Microsoft.App/managedEnvironments', variables('containerEnvName'))]",
+    "runsContainerId": "[resourceId('Microsoft.Storage/storageAccounts/blobServices/containers', variables('storageAccountName'), 'default', 'runs')]",
+    "auditContainerId": "[resourceId('Microsoft.Storage/storageAccounts/blobServices/containers', variables('storageAccountName'), 'default', 'audit')]",
+    "easyauthContainerId": "[resourceId('Microsoft.Storage/storageAccounts/blobServices/containers', variables('storageAccountName'), 'default', 'easyauth')]",
+    "approvalContainerId": "[resourceId('Microsoft.Storage/storageAccounts/blobServices/containers', variables('storageAccountName'), 'default', 'approval-page')]",
+
+    "roleAcrPull": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')]",
+    "roleFoundryUser": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '53ca6127-db72-4b80-b1b0-d745d6d5456d')]",
+    "roleCognitiveServicesUser": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'a97b65f3-24c7-4388-baec-2e87135dc908')]",
+    "roleOpenAIUser": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd')]",
+    "roleBlobDataContributor": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')]",
+    "roleBlobDataReader": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '2a2b9908-6ea1-4ae2-8e65-a410df84e7d1')]",
+    "roleMetricsPublisher": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '3913510d-42f4-4e42-8a64-420c390055eb')]",
+    "roleSearchServiceContributor": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7ca78c08-252a-4471-8644-bb5ff32d4ba0')]",
+    "roleSearchIndexDataContributor": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '8ebe5a00-799e-43f5-93ac-243d3dce84a7')]",
+
+    "cloudlabsCommon": "[concat(' -AzureUserName ', parameters('azureUserName'), ' -AzurePassword ', parameters('azurePassword'), ' -AzureTenantID ', variables('AzureTenantID'), ' -AzureSubscriptionID ', variables('AzureSubscriptionID'), ' -ODLID ', parameters('ODLID'), ' -DeploymentID ', parameters('DeploymentID'), ' -adminPassword ', parameters('adminPassword'))]",
+    "Enable-CloudLabsEmbeddedShadow": "[concat(' -vmAdminUsername ', parameters('adminUsername'), ' -trainerUserName ', parameters('trainerUserName'), ' -trainerUserPassword ', parameters('trainerUserPassword'))]",
+    "LabVMName": "[concat('labvm-', parameters('DeploymentID'))]",
+    "networkInterfaceName": "[concat(variables('LabVMName'), '-nic')]",
+    "publicIpAddressName": "[concat('labvmip', uniqueString(resourceGroup().id))]",
+    "networkSecurityGroupName": "nsg",
+    "virtualNetworkName": "vnet",
+    "subnetRef": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('virtualNetworkName'), 'subnet')]"
+  },
+  "resources": [
+    {
+      "comments": "CloudLabs JumpVM. Replace the psscript.ps1 path with this lab's script.",
+      "name": "[variables('LabVMName')]",
+      "type": "Microsoft.Compute/virtualMachines",
+      "apiVersion": "2022-11-01",
+      "location": "[variables('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/networkInterfaces', variables('networkInterfaceName'))]"
+      ],
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "plan": {
+        "name": "win2019",
+        "publisher": "spektra",
+        "product": "cloudlabs-windows-jumpvm"
+      },
+      "properties": {
+        "osProfile": {
+          "computerName": "[variables('LabVMName')]",
+          "adminUsername": "[parameters('adminUsername')]",
+          "adminPassword": "[parameters('adminPassword')]",
+          "windowsConfiguration": {
+            "provisionVmAgent": "true"
+          }
+        },
+        "hardwareProfile": {
+          "vmSize": "Standard_D2s_v5"
+        },
+        "storageProfile": {
+          "imageReference": {
+            "publisher": "Spektra",
+            "offer": "cloudlabs-windows-jumpvm",
+            "sku": "win2019",
+            "version": "latest"
+          },
+          "osDisk": {
+            "name": "[concat(variables('LabVMName'), '-osdisk')]",
+            "createOption": "fromImage",
+            "managedDisk": {
+              "storageAccountType": "Standard_LRS"
+            }
+          },
+          "dataDisks": []
+        },
+        "networkProfile": {
+          "networkInterfaces": [
+            {
+              "id": "[resourceId('Microsoft.Network/networkInterfaces', variables('networkInterfaceName'))]"
+            }
+          ]
+        }
+      },
+      "resources": [
+        {
+          "type": "extensions",
+          "name": "vmExtension",
+          "apiVersion": "2024-11-01",
+          "location": "[variables('location')]",
+          "dependsOn": [
+            "[resourceId('Microsoft.Compute/virtualMachines', variables('LabVMName'))]"
+          ],
+          "properties": {
+            "publisher": "Microsoft.Compute",
+            "type": "CustomScriptExtension",
+            "typeHandlerVersion": "1.8",
+            "autoUpgradeMinorVersion": true,
+            "settings": {
+              "fileUris": [
+                "https://experienceazure.blob.core.windows.net/templates/HTS/clinical-trial-screening/scripts/psscript.ps1",
+                "https://experienceazure.blob.core.windows.net/templates/cloudlabs-common/cloudlabs-windows-functions.ps1"
+              ]
+            },
+            "protectedSettings": {
+              "commandToExecute": "[concat('powershell.exe -ExecutionPolicy Unrestricted -File HTS/clinical-trial-screening/scripts/psscript.ps1', variables('cloudlabsCommon'), variables('Enable-CloudLabsEmbeddedShadow'))]"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "[variables('virtualNetworkName')]",
+      "type": "Microsoft.Network/virtualNetworks",
+      "apiVersion": "2022-09-01",
+      "location": "[variables('location')]",
+      "properties": {
+        "addressSpace": {
+          "addressPrefixes": [ "10.0.0.0/16" ]
+        },
+        "subnets": [
+          {
+            "name": "subnet",
+            "properties": {
+              "addressPrefix": "10.0.0.0/24"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "[variables('networkInterfaceName')]",
+      "type": "Microsoft.Network/networkInterfaces",
+      "apiVersion": "2022-09-01",
+      "location": "[variables('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/virtualNetworks', variables('virtualNetworkName'))]",
+        "[resourceId('Microsoft.Network/publicIPAddresses', variables('publicIpAddressName'))]",
+        "[resourceId('Microsoft.Network/networkSecurityGroups', variables('networkSecurityGroupName'))]"
+      ],
+      "properties": {
+        "ipConfigurations": [
+          {
+            "name": "ipconfig1",
+            "properties": {
+              "subnet": {
+                "id": "[variables('subnetRef')]"
+              },
+              "privateIPAllocationMethod": "Dynamic",
+              "publicIPAddress": {
+                "id": "[resourceId('Microsoft.Network/publicIPAddresses', variables('publicIpAddressName'))]"
+              }
+            }
+          }
+        ],
+        "networkSecurityGroup": {
+          "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('networkSecurityGroupName'))]"
+        }
+      }
+    },
+    {
+      "name": "[variables('publicIpAddressName')]",
+      "type": "Microsoft.Network/publicIPAddresses",
+      "apiVersion": "2022-09-01",
+      "location": "[variables('location')]",
+      "sku": {
+        "name": "Standard"
+      },
+      "properties": {
+        "publicIPAllocationMethod": "Static",
+        "dnsSettings": {
+          "domainNameLabel": "[variables('publicIpAddressName')]"
+        }
+      }
+    },
+    {
+      "name": "[variables('networkSecurityGroupName')]",
+      "type": "Microsoft.Network/networkSecurityGroups",
+      "apiVersion": "2022-09-01",
+      "location": "[variables('location')]",
+      "properties": {
+        "securityRules": [
+          {
+            "name": "default-allow-rdp",
+            "properties": {
+              "priority": 1000,
+              "protocol": "Tcp",
+              "access": "Allow",
+              "direction": "Inbound",
+              "sourceAddressPrefix": "*",
+              "sourcePortRange": "*",
+              "destinationAddressPrefix": "*",
+              "destinationPortRange": "3389"
+            }
+          }
+        ]
+      }
+    },
+
+    {
+      "comments": "Foundry (AI Services) account. Keyless: Entra ID only.",
+      "type": "Microsoft.CognitiveServices/accounts",
+      "apiVersion": "2025-06-01",
+      "name": "[variables('foundryName')]",
+      "location": "[variables('location')]",
+      "kind": "AIServices",
+      "sku": {
+        "name": "S0"
+      },
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "properties": {
+        "allowProjectManagement": true,
+        "customSubDomainName": "[variables('foundryName')]",
+        "disableLocalAuth": true,
+        "publicNetworkAccess": "Enabled"
+      }
+    },
+    {
+      "type": "Microsoft.CognitiveServices/accounts/projects",
+      "apiVersion": "2025-06-01",
+      "name": "[concat(variables('foundryName'), '/', variables('projectName'))]",
+      "location": "[variables('location')]",
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "dependsOn": [
+        "[variables('foundryId')]"
+      ],
+      "properties": {
+        "displayName": "Clinical Trial Pre-Screening Crew",
+        "description": "GLYCO-ADD pre-screening agents, reviewers and Note Reviewer"
+      }
+    },
+    {
+      "comments": "Extractor and groundedness judge. Deployments are chained: Foundry accepts one change at a time.",
+      "type": "Microsoft.CognitiveServices/accounts/deployments",
+      "apiVersion": "2025-06-01",
+      "name": "[concat(variables('foundryName'), '/', variables('extractorModel'))]",
+      "dependsOn": [
+        "[variables('projectId')]"
+      ],
+      "sku": {
+        "name": "GlobalStandard",
+        "capacity": "[parameters('extractorModelCapacity')]"
+      },
+      "properties": {
+        "model": {
+          "format": "OpenAI",
+          "name": "[variables('extractorModel')]",
+          "version": "2026-03-05"
+        },
+        "raiPolicyName": "Microsoft.DefaultV2"
+      }
+    },
+    {
+      "comments": "Reviewers and the Note Reviewer.",
+      "type": "Microsoft.CognitiveServices/accounts/deployments",
+      "apiVersion": "2025-06-01",
+      "name": "[concat(variables('foundryName'), '/', variables('reviewerModel'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.CognitiveServices/accounts/deployments', variables('foundryName'), variables('extractorModel'))]"
+      ],
+      "sku": {
+        "name": "GlobalStandard",
+        "capacity": "[parameters('reviewerModelCapacity')]"
+      },
+      "properties": {
+        "model": {
+          "format": "OpenAI",
+          "name": "[variables('reviewerModel')]",
+          "version": "2026-03-17"
+        },
+        "raiPolicyName": "Microsoft.DefaultV2"
+      }
+    },
+    {
+      "comments": "Protocol index embeddings and the Search query vectorizer.",
+      "type": "Microsoft.CognitiveServices/accounts/deployments",
+      "apiVersion": "2025-06-01",
+      "name": "[concat(variables('foundryName'), '/', variables('embeddingModel'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.CognitiveServices/accounts/deployments', variables('foundryName'), variables('reviewerModel'))]"
+      ],
+      "sku": {
+        "name": "GlobalStandard",
+        "capacity": "[parameters('embeddingModelCapacity')]"
+      },
+      "properties": {
+        "model": {
+          "format": "OpenAI",
+          "name": "[variables('embeddingModel')]",
+          "version": "1"
+        },
+        "raiPolicyName": "Microsoft.DefaultV2"
+      }
+    },
+
+    {
+      "comments": "AI Search Basic. No API keys, no index (the learner builds glyco-protocol in Challenge 2).",
+      "type": "Microsoft.Search/searchServices",
+      "apiVersion": "2023-11-01",
+      "name": "[variables('searchName')]",
+      "location": "[variables('location')]",
+      "sku": {
+        "name": "basic"
+      },
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "properties": {
+        "replicaCount": 1,
+        "partitionCount": 1,
+        "hostingMode": "default",
+        "publicNetworkAccess": "enabled",
+        "disableLocalAuth": true,
+        "semanticSearch": "standard"
+      }
+    },
+
+    {
+      "comments": "Content Safety for Prompt Shields. Custom subdomain is required for Entra tokens.",
+      "type": "Microsoft.CognitiveServices/accounts",
+      "apiVersion": "2025-06-01",
+      "name": "[variables('contentSafetyName')]",
+      "location": "[variables('location')]",
+      "kind": "ContentSafety",
+      "sku": {
+        "name": "S0"
+      },
+      "properties": {
+        "customSubDomainName": "[variables('contentSafetyName')]",
+        "disableLocalAuth": true,
+        "publicNetworkAccess": "Enabled"
+      }
+    },
+
+    {
+      "comments": "The one identity of the deployed apps and jobs.",
+      "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+      "apiVersion": "2023-01-31",
+      "name": "[variables('identityName')]",
+      "location": "[variables('location')]"
+    },
+
+    {
+      "comments": "Container registry Basic. No admin user, no anonymous pull, no images (learner builds them in Challenge 7).",
+      "type": "Microsoft.ContainerRegistry/registries",
+      "apiVersion": "2023-11-01-preview",
+      "name": "[variables('registryName')]",
+      "location": "[variables('location')]",
+      "sku": {
+        "name": "Basic"
+      },
+      "properties": {
+        "adminUserEnabled": false,
+        "anonymousPullEnabled": false,
+        "publicNetworkAccess": "Enabled",
+        "policies": {
+          "azureADAuthenticationAsArmPolicy": {
+            "status": "enabled"
+          }
+        }
+      }
+    },
+
+    {
+      "type": "Microsoft.OperationalInsights/workspaces",
+      "apiVersion": "2023-09-01",
+      "name": "[variables('logAnalyticsName')]",
+      "location": "[variables('location')]",
+      "properties": {
+        "sku": {
+          "name": "PerGB2018"
+        },
+        "retentionInDays": 30,
+        "features": {
+          "disableLocalAuth": true
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Insights/components",
+      "apiVersion": "2020-02-02",
+      "name": "[variables('appInsightsName')]",
+      "location": "[variables('location')]",
+      "kind": "web",
+      "dependsOn": [
+        "[variables('logAnalyticsId')]"
+      ],
+      "properties": {
+        "Application_Type": "web",
+        "WorkspaceResourceId": "[variables('logAnalyticsId')]",
+        "DisableLocalAuth": true
+      }
+    },
+
+    {
+      "comments": "Run state and audit storage. Shared key off: every caller uses Entra ID.",
+      "type": "Microsoft.Storage/storageAccounts",
+      "apiVersion": "2023-05-01",
+      "name": "[variables('storageAccountName')]",
+      "location": "[variables('location')]",
+      "sku": {
+        "name": "Standard_LRS"
+      },
+      "kind": "StorageV2",
+      "properties": {
+        "accessTier": "Hot",
+        "allowSharedKeyAccess": false,
+        "defaultToOAuthAuthentication": true,
+        "allowBlobPublicAccess": false,
+        "minimumTlsVersion": "TLS1_2",
+        "supportsHttpsTrafficOnly": true,
+        "publicNetworkAccess": "Enabled"
+      }
+    },
+    {
+      "comments": "Run state: checkpoints, verdict store, run records.",
+      "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+      "apiVersion": "2023-05-01",
+      "name": "[concat(variables('storageAccountName'), '/default/runs')]",
+      "dependsOn": [
+        "[variables('storageId')]"
+      ],
+      "properties": {
+        "publicAccess": "None"
+      }
+    },
+    {
+      "comments": "Audit log (append-only through the immutability policy below).",
+      "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+      "apiVersion": "2023-05-01",
+      "name": "[concat(variables('storageAccountName'), '/default/audit')]",
+      "dependsOn": [
+        "[variables('storageId')]"
+      ],
+      "properties": {
+        "publicAccess": "None"
+      }
+    },
+    {
+      "comments": "Time-based retention, unlocked, protected append writes allowed: lines can be added, nothing overwritten or deleted.",
+      "type": "Microsoft.Storage/storageAccounts/blobServices/containers/immutabilityPolicies",
+      "apiVersion": "2023-05-01",
+      "name": "[concat(variables('storageAccountName'), '/default/audit/default')]",
+      "dependsOn": [
+        "[variables('auditContainerId')]"
+      ],
+      "properties": {
+        "immutabilityPeriodSinceCreationInDays": "[parameters('auditRetentionDays')]",
+        "allowProtectedAppendWrites": true
+      }
+    },
+    {
+      "comments": "Approval page Easy Auth token store.",
+      "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+      "apiVersion": "2023-05-01",
+      "name": "[concat(variables('storageAccountName'), '/default/easyauth')]",
+      "dependsOn": [
+        "[variables('storageId')]"
+      ],
+      "properties": {
+        "publicAccess": "None"
+      }
+    },
+    {
+      "comments": "Approval page form-signing key (the page creates the blob on first start).",
+      "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+      "apiVersion": "2023-05-01",
+      "name": "[concat(variables('storageAccountName'), '/default/approval-page')]",
+      "dependsOn": [
+        "[variables('storageId')]"
+      ],
+      "properties": {
+        "publicAccess": "None"
+      }
+    },
+
+    {
+      "comments": "Container Apps environment, Consumption profile, logs to Azure Monitor (no workspace key). No apps or jobs (learner deploys them in Challenge 7).",
+      "type": "Microsoft.App/managedEnvironments",
+      "apiVersion": "2024-03-01",
+      "name": "[variables('containerEnvName')]",
+      "location": "[variables('location')]",
+      "properties": {
+        "appLogsConfiguration": {
+          "destination": "azure-monitor"
+        },
+        "workloadProfiles": [
+          {
+            "name": "Consumption",
+            "workloadProfileType": "Consumption"
+          }
+        ],
+        "zoneRedundant": false
+      }
+    },
+    {
+      "type": "Microsoft.Insights/diagnosticSettings",
+      "apiVersion": "2021-05-01-preview",
+      "name": "to-log-analytics",
+      "scope": "[variables('containerEnvId')]",
+      "dependsOn": [
+        "[variables('containerEnvId')]",
+        "[variables('logAnalyticsId')]"
+      ],
+      "properties": {
+        "workspaceId": "[variables('logAnalyticsId')]",
+        "logs": [
+          {
+            "categoryGroup": "allLogs",
+            "enabled": true
+          }
+        ]
+      }
+    },
+
+    {
+      "comments": "Identity: AcrPull on the registry (apps and jobs pull images with no password).",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[guid(variables('registryId'), variables('identityId'), 'acrpull')]",
+      "scope": "[variables('registryId')]",
+      "dependsOn": [ "[variables('registryId')]", "[variables('identityId')]" ],
+      "properties": {
+        "roleDefinitionId": "[variables('roleAcrPull')]",
+        "principalId": "[reference(variables('identityId'), '2023-01-31').principalId]",
+        "principalType": "ServicePrincipal"
+      }
+    },
+    {
+      "comments": "Identity: Foundry User on the project (reviewer and Note Reviewer model calls).",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[guid(variables('projectId'), variables('identityId'), 'foundry-user')]",
+      "scope": "[variables('projectId')]",
+      "dependsOn": [ "[variables('projectId')]", "[variables('identityId')]" ],
+      "properties": {
+        "roleDefinitionId": "[variables('roleFoundryUser')]",
+        "principalId": "[reference(variables('identityId'), '2023-01-31').principalId]",
+        "principalType": "ServicePrincipal"
+      }
+    },
+    {
+      "comments": "Identity: Cognitive Services User on Content Safety (Prompt Shields on every clinical note).",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[guid(variables('contentSafetyId'), variables('identityId'), 'cs-user')]",
+      "scope": "[variables('contentSafetyId')]",
+      "dependsOn": [ "[variables('contentSafetyId')]", "[variables('identityId')]" ],
+      "properties": {
+        "roleDefinitionId": "[variables('roleCognitiveServicesUser')]",
+        "principalId": "[reference(variables('identityId'), '2023-01-31').principalId]",
+        "principalType": "ServicePrincipal"
+      }
+    },
+    {
+      "comments": "Identity: Storage Blob Data Contributor on 'runs' (run state, lease lock).",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[guid(variables('runsContainerId'), variables('identityId'), 'blob-contrib')]",
+      "scope": "[variables('runsContainerId')]",
+      "dependsOn": [ "[variables('runsContainerId')]", "[variables('identityId')]" ],
+      "properties": {
+        "roleDefinitionId": "[variables('roleBlobDataContributor')]",
+        "principalId": "[reference(variables('identityId'), '2023-01-31').principalId]",
+        "principalType": "ServicePrincipal"
+      }
+    },
+    {
+      "comments": "Identity: Storage Blob Data Contributor on 'audit' (append; the immutability policy still refuses overwrite and delete).",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[guid(variables('auditContainerId'), variables('identityId'), 'blob-contrib')]",
+      "scope": "[variables('auditContainerId')]",
+      "dependsOn": [ "[variables('auditContainerId')]", "[variables('identityId')]" ],
+      "properties": {
+        "roleDefinitionId": "[variables('roleBlobDataContributor')]",
+        "principalId": "[reference(variables('identityId'), '2023-01-31').principalId]",
+        "principalType": "ServicePrincipal"
+      }
+    },
+    {
+      "comments": "Identity: Storage Blob Data Contributor on 'easyauth' (Easy Auth token store).",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[guid(variables('easyauthContainerId'), variables('identityId'), 'blob-contrib')]",
+      "scope": "[variables('easyauthContainerId')]",
+      "dependsOn": [ "[variables('easyauthContainerId')]", "[variables('identityId')]" ],
+      "properties": {
+        "roleDefinitionId": "[variables('roleBlobDataContributor')]",
+        "principalId": "[reference(variables('identityId'), '2023-01-31').principalId]",
+        "principalType": "ServicePrincipal"
+      }
+    },
+    {
+      "comments": "Identity: Storage Blob Data Contributor on 'approval-page' (create once, then read, the form-signing key).",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[guid(variables('approvalContainerId'), variables('identityId'), 'blob-contrib')]",
+      "scope": "[variables('approvalContainerId')]",
+      "dependsOn": [ "[variables('approvalContainerId')]", "[variables('identityId')]" ],
+      "properties": {
+        "roleDefinitionId": "[variables('roleBlobDataContributor')]",
+        "principalId": "[reference(variables('identityId'), '2023-01-31').principalId]",
+        "principalType": "ServicePrincipal"
+      }
+    },
+    {
+      "comments": "Identity: Monitoring Metrics Publisher on App Insights (telemetry with Entra auth).",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[guid(variables('appInsightsId'), variables('identityId'), 'metrics-publisher')]",
+      "scope": "[variables('appInsightsId')]",
+      "dependsOn": [ "[variables('appInsightsId')]", "[variables('identityId')]" ],
+      "properties": {
+        "roleDefinitionId": "[variables('roleMetricsPublisher')]",
+        "principalId": "[reference(variables('identityId'), '2023-01-31').principalId]",
+        "principalType": "ServicePrincipal"
+      }
+    },
+    {
+      "comments": "Search service identity: Cognitive Services OpenAI User on the Foundry account (the index vectorizer embeds query text itself).",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[guid(variables('foundryId'), variables('searchId'), 'openai-user')]",
+      "scope": "[variables('foundryId')]",
+      "dependsOn": [ "[variables('foundryId')]", "[variables('searchId')]" ],
+      "properties": {
+        "roleDefinitionId": "[variables('roleOpenAIUser')]",
+        "principalId": "[reference(variables('searchId'), '2023-11-01', 'full').identity.principalId]",
+        "principalType": "ServicePrincipal"
+      }
+    },
+
+    {
+      "comments": "Learner: Foundry User on the project (agents, extraction, groundedness from the learner's machine).",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[guid(variables('projectId'), parameters('azuserobjectid'), 'learner-foundry-user')]",
+      "scope": "[variables('projectId')]",
+      "dependsOn": [ "[variables('projectId')]" ],
+      "properties": {
+        "roleDefinitionId": "[variables('roleFoundryUser')]",
+        "principalId": "[parameters('azuserobjectid')]",
+        "principalType": "User"
+      }
+    },
+    {
+      "comments": "Learner: Cognitive Services OpenAI User on the Foundry account (embeddings and the groundedness judge use the account-scoped OpenAI endpoint).",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[guid(variables('foundryId'), parameters('azuserobjectid'), 'learner-openai-user')]",
+      "scope": "[variables('foundryId')]",
+      "dependsOn": [ "[variables('foundryId')]" ],
+      "properties": {
+        "roleDefinitionId": "[variables('roleOpenAIUser')]",
+        "principalId": "[parameters('azuserobjectid')]",
+        "principalType": "User"
+      }
+    },
+    {
+      "comments": "Learner: Search Service Contributor (create the index, Challenge 2).",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[guid(variables('searchId'), parameters('azuserobjectid'), 'learner-search-svc')]",
+      "scope": "[variables('searchId')]",
+      "dependsOn": [ "[variables('searchId')]" ],
+      "properties": {
+        "roleDefinitionId": "[variables('roleSearchServiceContributor')]",
+        "principalId": "[parameters('azuserobjectid')]",
+        "principalType": "User"
+      }
+    },
+    {
+      "comments": "Learner: Search Index Data Contributor (upload and query documents, Challenges 2 and 3).",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[guid(variables('searchId'), parameters('azuserobjectid'), 'learner-search-data')]",
+      "scope": "[variables('searchId')]",
+      "dependsOn": [ "[variables('searchId')]" ],
+      "properties": {
+        "roleDefinitionId": "[variables('roleSearchIndexDataContributor')]",
+        "principalId": "[parameters('azuserobjectid')]",
+        "principalType": "User"
+      }
+    },
+    {
+      "comments": "Learner: Cognitive Services User on Content Safety (Prompt Shields, Challenge 5).",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[guid(variables('contentSafetyId'), parameters('azuserobjectid'), 'learner-cs-user')]",
+      "scope": "[variables('contentSafetyId')]",
+      "dependsOn": [ "[variables('contentSafetyId')]" ],
+      "properties": {
+        "roleDefinitionId": "[variables('roleCognitiveServicesUser')]",
+        "principalId": "[parameters('azuserobjectid')]",
+        "principalType": "User"
+      }
+    },
+    {
+      "comments": "Learner: Storage Blob Data Reader on 'runs' (verify a deployed run, Challenge 7).",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[guid(variables('runsContainerId'), parameters('azuserobjectid'), 'learner-blob-reader')]",
+      "scope": "[variables('runsContainerId')]",
+      "dependsOn": [ "[variables('runsContainerId')]" ],
+      "properties": {
+        "roleDefinitionId": "[variables('roleBlobDataReader')]",
+        "principalId": "[parameters('azuserobjectid')]",
+        "principalType": "User"
+      }
+    },
+    {
+      "comments": "Learner: Storage Blob Data Reader on 'audit' (verify a deployed run's audit trail, Challenge 7).",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[guid(variables('auditContainerId'), parameters('azuserobjectid'), 'learner-blob-reader')]",
+      "scope": "[variables('auditContainerId')]",
+      "dependsOn": [ "[variables('auditContainerId')]" ],
+      "properties": {
+        "roleDefinitionId": "[variables('roleBlobDataReader')]",
+        "principalId": "[parameters('azuserobjectid')]",
+        "principalType": "User"
+      }
+    }
+  ],
+  "outputs": {
+    "DeploymentID": {
+      "type": "string",
+      "value": "[parameters('DeploymentID')]"
+    },
+    "LabVM Admin Username": {
+      "type": "string",
+      "value": "[parameters('adminUsername')]"
+    },
+    "LabVM Admin Password": {
+      "type": "string",
+      "value": "[parameters('adminPassword')]"
+    },
+    "LabVM DNS Name": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Network/publicIPAddresses', variables('publicIpAddressName'))).dnsSettings.fqdn]"
+    },
+    "Trainer Password": {
+      "type": "string",
+      "value": "[parameters('trainerUserPassword')]"
+    },
+    "Suffix": {
+      "type": "string",
+      "value": "[variables('suffix')]"
+    },
+    "Foundry Project Endpoint": {
+      "type": "string",
+      "value": "[concat('https://', variables('foundryName'), '.services.ai.azure.com/api/projects/', variables('projectName'))]"
+    },
+    "Foundry OpenAI Endpoint": {
+      "type": "string",
+      "value": "[concat('https://', variables('foundryName'), '.openai.azure.com/')]"
+    },
+    "Extractor Model Deployment": {
+      "type": "string",
+      "value": "[variables('extractorModel')]"
+    },
+    "Reviewer Model Deployment": {
+      "type": "string",
+      "value": "[variables('reviewerModel')]"
+    },
+    "Embedding Model Deployment": {
+      "type": "string",
+      "value": "[variables('embeddingModel')]"
+    },
+    "Search Endpoint": {
+      "type": "string",
+      "value": "[concat('https://', variables('searchName'), '.search.windows.net')]"
+    },
+    "Content Safety Endpoint": {
+      "type": "string",
+      "value": "[concat('https://', variables('contentSafetyName'), '.cognitiveservices.azure.com/')]"
+    },
+    "Identity Resource ID": {
+      "type": "string",
+      "value": "[variables('identityId')]"
+    },
+    "Identity Client ID": {
+      "type": "string",
+      "value": "[reference(variables('identityId'), '2023-01-31').clientId]"
+    },
+    "Identity Principal ID": {
+      "type": "string",
+      "value": "[reference(variables('identityId'), '2023-01-31').principalId]"
+    },
+    "Container Registry": {
+      "type": "string",
+      "value": "[reference(variables('registryId'), '2023-11-01-preview').loginServer]"
+    },
+    "Storage Account": {
+      "type": "string",
+      "value": "[variables('storageAccountName')]"
+    },
+    "App Insights Connection String": {
+      "type": "string",
+      "value": "[reference(variables('appInsightsId'), '2020-02-02').ConnectionString]"
+    },
+    "Container Apps Environment": {
+      "type": "string",
+      "value": "[variables('containerEnvName')]"
+    },
+    "Approval Page Redirect URI": {
+      "type": "string",
+      "value": "[concat('https://ca-approval.', reference(variables('containerEnvId'), '2024-03-01').defaultDomain, '/.auth/login/aad/callback')]"
+    },
+    "Internal MCP URL": {
+      "type": "string",
+      "value": "[concat('https://ca-fhir-mcp.internal.', reference(variables('containerEnvId'), '2024-03-01').defaultDomain, '/mcp')]"
+    }
+  }
+}
