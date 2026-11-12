@@ -136,7 +136,7 @@
   },
   "resources": [
     {
-      "comments": "CloudLabs JumpVM. Replace the psscript.ps1 path with this lab's script.",
+      "comments": "CloudLabs JumpVM. psscript.ps1 comes from GitHub, so the extension saves it at the root of its download folder (-File psscript.ps1). Blob URIs keep their path after the container, which is why cloudlabs-common\\ still resolves.",
       "name": "[variables('LabVMName')]",
       "type": "Microsoft.Compute/virtualMachines",
       "apiVersion": "2022-11-01",
@@ -210,7 +210,7 @@
               ]
             },
             "protectedSettings": {
-              "commandToExecute": "[concat('powershell.exe -ExecutionPolicy Unrestricted -File HTS/clinical-trial-screening/scripts/psscript.ps1', variables('cloudlabsCommon'), variables('Enable-CloudLabsEmbeddedShadow'))]"
+              "commandToExecute": "[concat('powershell.exe -ExecutionPolicy Unrestricted -File psscript.ps1', variables('cloudlabsCommon'), variables('Enable-CloudLabsEmbeddedShadow'))]"
             }
           }
         }
@@ -876,6 +876,10 @@
     "JumpVM Identity Object ID": {
       "type": "string",
       "value": "[reference(resourceId('Microsoft.Compute/virtualMachines', variables('LabVMName')), '2022-11-01', 'full').identity.principalId]"
+    },
+    "Resource Group": {
+      "type": "string",
+      "value": "[resourceGroup().name]"
     },
     "Suffix": {
       "type": "string",
